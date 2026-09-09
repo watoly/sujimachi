@@ -24,8 +24,12 @@ export function timestampForFile(): string {
 }
 
 /** プレーンテキスト（UTF-8、BOM 無し）を書き出す。 */
-export function downloadText(filename: string, content: string): void {
-  download(filename, content, 'text/plain;charset=utf-8');
+export function downloadText(
+  filename: string,
+  content: string,
+  mime = 'text/plain;charset=utf-8',
+): void {
+  download(filename, content, mime);
 }
 
 /**

@@ -6,6 +6,7 @@ import { SummaryBar, type GroupFilter } from './components/SummaryBar';
 import { ResultsTable } from './components/ResultsTable';
 import { ProgressBar } from './components/ProgressBar';
 import { KeywordStats } from './components/KeywordStats';
+import { Timeline } from './components/Timeline';
 import { isCsvFileName, readCsvSource } from './lib/csv';
 import { buildMatcher, compileKeywords } from './lib/matcher';
 import {
@@ -16,17 +17,21 @@ import {
 } from './lib/analyze';
 import { loadKeywords, saveKeywords } from './lib/keywords';
 import { loadGroups, saveGroups } from './lib/groups';
-import { exportResultsCsv } from './lib/export';
+import { downloadText, exportResultsCsv, timestampForFile } from './lib/export';
+import { applySelection, buildSelection, parseSelection, serializeSelection } from './lib/selection';
+import { parseTimestamp, type TimeRange } from './lib/time';
 import { formatBytes, formatDuration } from './lib/format';
 import type { AnalyzeSummary, CsvSource, Keyword, KeywordGroup, RowResult } from './types';
 
 type View = 'analyze' | 'keywords';
+type SortOrder = 'file' | 'time-asc' | 'time-desc';
 
 export default function App() {
   const [view, setView] = useState<View>('analyze');
 
   const [sources, setSources] = useState<CsvSource[]>([]);
   const [loadProgress, setLoadProgress] = useState<LoadProgress | null>(null);
+  const [nameFilter, setNameFilter] = useState('');
 
   const [groups, setGroups] = useState<KeywordGroup[]>(() => loadGroups());
   const [keywords, setKeywords] = useState<Keyword[]>(() => loadKeywords());
@@ -43,6 +48,9 @@ export default function App() {
   const [active, setActive] = useState<GroupFilter>('all');
   const [fileFilter, setFileFilter] = useState<string>('all');
   const [textFilter, setTextFilter] = useState('');
+  const [timeRange, setTimeRange] = useState<TimeRange | null>(null);
+  const [sortOrder, setSortOrder] = useState<SortOrder>('file');
+  const [showTimeline, setShowTimeline] = useState(true);
   const [notice, setNotice] = useState<string | null>(null);
 
   const cancelRef = useRef(false);
@@ -60,6 +68,11 @@ export default function App() {
     const id = setTimeout(() => setNotice(null), 10000);
     return () => clearTimeout(id);
   }, [notice]);
+
+  // 解析し直したら時間の選択範囲は意味を失う
+  useEffect(() => {
+    setTimeRange(null);
+  }, [results]);
 
   const skipDirty = useRef(true);
   useEffect(() => {
@@ -127,10 +140,59 @@ export default function App() {
     setFileFilter('all');
     setActive('all');
     setTextFilter('');
+    setNameFilter('');
+    setTimeRange(null);
+    setSortOrder('file');
   }
 
-  function handleSetAllEnabled(enabled: boolean) {
-    setSources((prev) => prev.map((s) => ({ ...s, enabled })));
+  /** ids が null なら全件、配列ならその分だけ切り替える。 */
+  function handleSetEnabled(ids: string[] | null, enabled: boolean) {
+    if (ids === null) {
+      setSources((prev) => prev.map((s) => ({ ...s, enabled })));
+      return;
+    }
+    const target = new Set(ids);
+    setSources((prev) => prev.map((s) => (target.has(s.id) ? { ...s, enabled } : s)));
+  }
+
+  function handleExportSelection() {
+    if (sources.length === 0) {
+      setNotice('書き出す対象がありません。先に CSV を読み込んでください。');
+      return;
+    }
+    const sel = buildSelection(sources, nameFilter);
+    downloadText(
+      `sujimachi-selection_${timestampForFile()}.json`,
+      serializeSelection(sel),
+      'application/json;charset=utf-8',
+    );
+    setNotice(`${sources.length} ファイル分の選択状態を書き出しました。`);
+  }
+
+  async function handleImportSelection(file: File) {
+    if (sources.length === 0) {
+      setNotice('先に CSV を読み込んでから復元してください（ファイル名で対応づけます）。');
+      return;
+    }
+    try {
+      const sel = parseSelection(await file.text());
+      const res = applySelection(sources, sel);
+      setSources(res.sources);
+      if (sel.nameFilter !== undefined) setNameFilter(sel.nameFilter);
+
+      const parts = [`${res.applied} ファイルの選択状態を復元しました`];
+      if (res.missing.length > 0) {
+        parts.push(
+          `設定にあるが読み込まれていないファイル ${res.missing.length} 件（例: ${res.missing[0]}）`,
+        );
+      }
+      if (res.untouched > 0) {
+        parts.push(`設定に無いファイル ${res.untouched} 件は現在の選択のままです`);
+      }
+      setNotice(parts.join('。') + '。');
+    } catch (e) {
+      setNotice(`選択状態を読み込めませんでした: ${e instanceof Error ? e.message : String(e)}`);
+    }
   }
 
   async function runAnalysis() {
@@ -215,7 +277,31 @@ export default function App() {
     return counts;
   }, [results, groups]);
 
-  const filtered = useMemo(() => {
+  // 日時カラムの割り当てが変わったときだけ組み直す。
+  // sourcesById は enabled を切り替えるだけでも変わるので、依存には使わない。
+  const timestampKey = useMemo(
+    () => sources.map((s) => `${s.id}:${s.timestampColumn ?? ''}`).join('|'),
+    [sources],
+  );
+
+  const times = useMemo(() => {
+    const map = new Map<RowResult, number>();
+    if (!results) return map;
+    const columnByFile = new Map(sources.map((s) => [s.id, s.timestampColumn]));
+    for (const r of results) {
+      const column = columnByFile.get(r.fileId);
+      if (!column) continue;
+      const t = parseTimestamp(r.row[column] ?? '');
+      if (t !== null) map.set(r, t);
+    }
+    return map;
+  }, [results, timestampKey]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  /**
+   * 時間による絞り込みを掛ける前の結果。
+   * 時系列グラフはこちらを見る（範囲を選ぶたびに棒が消えると比較にならないため）。
+   */
+  const beforeTimeFilter = useMemo(() => {
     if (!results) return [];
     const t = textFilter.trim().toLowerCase();
     return results.filter((r) => {
@@ -232,6 +318,28 @@ export default function App() {
       return false;
     });
   }, [results, active, fileFilter, textFilter]);
+
+  const filtered = useMemo(() => {
+    let list = beforeTimeFilter;
+    if (timeRange) {
+      list = list.filter((r) => {
+        const t = times.get(r);
+        return t !== undefined && t >= timeRange.from && t < timeRange.to;
+      });
+    }
+    if (sortOrder !== 'file') {
+      const dir = sortOrder === 'time-asc' ? 1 : -1;
+      list = [...list].sort((a, b) => {
+        const ta = times.get(a);
+        const tb = times.get(b);
+        // 日時が読めない行は、並び順にかかわらず末尾へ
+        if (ta === undefined) return tb === undefined ? 0 : 1;
+        if (tb === undefined) return -1;
+        return (ta - tb) * dir;
+      });
+    }
+    return list;
+  }, [beforeTimeFilter, timeRange, sortOrder, times]);
 
   const enabledSources = sources.filter((s) => s.enabled);
   const enabledCount = keywords.filter((k) => k.enabled).length;
@@ -292,11 +400,15 @@ export default function App() {
               sources={sources}
               progress={loadProgress}
               busy={analyzing}
+              nameFilter={nameFilter}
+              onNameFilterChange={setNameFilter}
               onAddFiles={(fs) => void handleAddFiles(fs)}
               onRemove={handleRemove}
               onClearAll={handleClearAll}
               onUpdate={updateSource}
-              onSetAllEnabled={handleSetAllEnabled}
+              onSetEnabled={handleSetEnabled}
+              onExportSelection={handleExportSelection}
+              onImportSelection={(f) => void handleImportSelection(f)}
             />
             <KeywordSummary
               keywords={keywords}
@@ -359,6 +471,24 @@ export default function App() {
                           ))}
                         </select>
                       )}
+                      <select
+                        className="file-select"
+                        value={sortOrder}
+                        onChange={(e) => setSortOrder(e.target.value as SortOrder)}
+                        title="表示順"
+                      >
+                        <option value="file">ファイル順</option>
+                        <option value="time-asc">日時の古い順</option>
+                        <option value="time-desc">日時の新しい順</option>
+                      </select>
+                      <label className="switch" title="時系列グラフの表示">
+                        <input
+                          type="checkbox"
+                          checked={showTimeline}
+                          onChange={(e) => setShowTimeline(e.target.checked)}
+                        />
+                        時系列
+                      </label>
                       <input
                         className="filter-input"
                         type="search"
@@ -420,6 +550,16 @@ export default function App() {
                     countsByGroup={countsByGroup}
                     active={active}
                     onSelect={setActive}
+                  />
+                )}
+
+                {results && results.length > 0 && showTimeline && (
+                  <Timeline
+                    results={beforeTimeFilter}
+                    times={times}
+                    groups={groups}
+                    range={timeRange}
+                    onRangeChange={setTimeRange}
                   />
                 )}
 
