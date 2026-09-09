@@ -1,0 +1,66 @@
+# タグを push するとリリースを作り、単一 HTML の配布版を添付する。
+#
+#   git tag v0.1.0 && git push origin v0.1.0
+#
+# 手元でビルドして手作業で添付する運用だと、ビルドし忘れや古いファイルの
+# 添付が起きる。タグから必ずビルドし直すことで、配布物とソースが必ず一致する。
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+# gh release create でリリースを作るために必要
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: 依存関係をインストール
+        run: npm ci
+
+      # build:standalone は tsc による型検査を含むので、
+      # 型エラーがあればここでリリースが止まる
+      - name: 配布版をビルド
+        run: npm run build:standalone
+
+      - name: 成果物を確認
+        run: |
+          test -f dist-standalone/sujimachi.html
+          echo "size: $(du -h dist-standalone/sujimachi.html | cut -f1)"
+          # 外部参照が残っていないこと（単一ファイルで完結する保証）
+          if grep -qE '(src|href)="[^"]*"' dist-standalone/sujimachi.html; then
+            echo "外部参照が残っています" >&2
+            exit 1
+          fi
+
+      - name: リリースを作成
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          cat > notes.md <<EOF
+          ## ダウンロード
+
+          下の \`sujimachi.html\` をダウンロードし、ブラウザで開くだけで使えます。
+
+          - インストール・サーバー・インターネット接続はいずれも不要です
+          - 推奨ブラウザ: Chrome / Edge
+          - 読み込んだ CSV は端末内でのみ処理され、外部には送信されません
+
+          使い方は [README](https://github.com/${REPO}#readme) を参照してください。
+          EOF
+          gh release create "$GITHUB_REF_NAME" \
+            dist-standalone/sujimachi.html \
+            --title "$GITHUB_REF_NAME" \
+            --notes-file notes.md
