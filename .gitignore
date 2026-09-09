@@ -1,0 +1,11 @@
+node_modules
+dist
+dist-standalone
+dist-ssr
+*.local
+.DS_Store
+node_modules/.tmp
+
+# 実データを誤ってコミットしないためのガード
+# （業務データはリポジトリに含めない）
+/data

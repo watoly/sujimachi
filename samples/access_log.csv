@@ -1,0 +1,10 @@
+timestamp,level,source_ip,user,method,path,status,duration_ms,message
+2025-08-01T09:00:01Z,INFO,10.0.0.11,alice,GET,/api/orders,200,42,ok
+2025-08-01T09:00:05Z,WARN,10.0.0.12,bob,POST,/api/orders,201,180,slow upstream
+2025-08-01T09:01:20Z,ERROR,10.0.0.13,carol,GET,/api/reports/monthly,500,3100,timeout while generating report
+2025-08-01T09:02:00Z,INFO,10.0.0.11,alice,GET,/api/products,200,31,ok
+2025-08-01T09:03:44Z,ERROR,10.0.0.99,unknown,POST,/api/login,401,15,authentication failed
+2025-08-01T09:05:10Z,INFO,10.0.0.14,dave,GET,/api/online/status,200,12,ok
+2025-08-01T09:06:33Z,WARN,10.0.0.12,bob,GET,/api/orders?deadline=2025-08-31,200,890,slow query
+2025-08-01T09:08:02Z,ERROR,10.0.0.13,carol,DELETE,/api/orders/1003,500,220,unexpected error
+2025-08-01T09:09:15Z,INFO,10.0.0.15,erin,GET,/health,200,3,ok
