@@ -1,17 +1,29 @@
-# タグを push するとリリースを作り、単一 HTML の配布版を添付する。
+# リリースを作り、単一 HTML の配布版を添付する。
 #
-#   git tag v0.1.0 && git push origin v0.1.0
+# 起動方法は 2 つある。
+#
+#   1. GitHub の Actions 画面から手動で実行し、バージョン（例: v0.1.0）を入力する
+#      → タグの作成からリリースまで全部やる。git コマンドは不要
+#   2. タグを push する
+#      → git tag v0.1.0 && git push origin v0.1.0
 #
 # 手元でビルドして手作業で添付する運用だと、ビルドし忘れや古いファイルの
-# 添付が起きる。タグから必ずビルドし直すことで、配布物とソースが必ず一致する。
+# 添付が起きる。タグの時点のソースから必ずビルドし直すことで、
+# 配布物とソースが必ず一致することを保証する。
 name: Release
 
 on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'バージョン（例: v0.1.0）'
+        required: true
+        type: string
   push:
     tags:
       - 'v*'
 
-# gh release create でリリースを作るために必要
+# リリースとタグを作るために必要
 permissions:
   contents: write
 
@@ -26,6 +38,26 @@ jobs:
           node-version: '22'
           cache: npm
 
+      - name: バージョンを決める
+        id: ver
+        env:
+          # 入力値をシェルへ直接展開せず環境変数経由で渡す（コマンド注入の回避）
+          INPUT_VERSION: ${{ inputs.version }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -eu
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            TAG="$INPUT_VERSION"
+          else
+            TAG="$GITHUB_REF_NAME"
+          fi
+          case "$TAG" in
+            v[0-9]*) ;;
+            *) echo "バージョンは v で始めてください（例: v0.1.0）。入力: $TAG" >&2; exit 1 ;;
+          esac
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "リリースするバージョン: $TAG"
+
       - name: 依存関係をインストール
         run: npm ci
 
@@ -34,21 +66,26 @@ jobs:
       - name: 配布版をビルド
         run: npm run build:standalone
 
-      - name: 成果物を確認
+      - name: 成果物を検査
         run: |
+          set -eu
           test -f dist-standalone/sujimachi.html
-          echo "size: $(du -h dist-standalone/sujimachi.html | cut -f1)"
-          # 外部参照が残っていないこと（単一ファイルで完結する保証）
+          echo "サイズ: $(du -h dist-standalone/sujimachi.html | cut -f1)"
+          # 外部参照が残っていないこと（1 ファイルだけで完結する保証）
           if grep -qE '(src|href)="[^"]*"' dist-standalone/sujimachi.html; then
             echo "外部参照が残っています" >&2
             exit 1
           fi
 
+      # gh release create はタグが無ければ作成してくれるので、
+      # 手動実行の場合もここでタグが作られる
       - name: リリースを作成
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
+          TAG: ${{ steps.ver.outputs.tag }}
         run: |
+          set -eu
           cat > notes.md <<EOF
           ## ダウンロード
 
@@ -60,7 +97,8 @@ jobs:
 
           使い方は [README](https://github.com/${REPO}#readme) を参照してください。
           EOF
-          gh release create "$GITHUB_REF_NAME" \
+          gh release create "$TAG" \
             dist-standalone/sujimachi.html \
-            --title "$GITHUB_REF_NAME" \
+            --target "$GITHUB_SHA" \
+            --title "$TAG" \
             --notes-file notes.md
